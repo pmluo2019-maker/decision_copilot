@@ -183,6 +183,15 @@
   }
   .send:disabled{background:var(--ink-3); color:var(--mist-2)}
   .send:active:not(:disabled){transform:scale(.9)}
+  .mic{
+    width:38px; height:38px; flex:none; border-radius:50%; cursor:pointer;
+    background:transparent; border:1px solid var(--line); color:var(--mist);
+    display:grid; place-items:center; transition:.18s;
+  }
+  .mic:active:not(:disabled){transform:scale(.9)}
+  .mic:disabled{opacity:.4; cursor:default}
+  .mic.rec{ background:var(--ember); border-color:var(--ember); color:#1A1710; animation:micpulse 1.3s infinite }
+  @keyframes micpulse{0%{box-shadow:0 0 0 0 rgba(210,134,90,.5)}70%{box-shadow:0 0 0 9px rgba(210,134,90,0)}100%{box-shadow:0 0 0 0 rgba(210,134,90,0)}}
   .foot{text-align:center; font-size:10.5px; color:var(--mist-2); margin-top:8px; font-family:var(--cn)}
 
   /* ---------- 欢迎态 ---------- */
@@ -354,6 +363,9 @@
     <div class="chips" id="chips"></div>
     <div class="inbar">
       <textarea id="input" rows="1" placeholder="说说你正在纠结的决策…"></textarea>
+      <button class="mic" id="micBtn" aria-label="语音输入">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3.5M9 20.5h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none"/></svg>
+      </button>
       <button class="send" id="sendBtn" disabled aria-label="发送">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M4 12l16-8-5 8 5 8-16-8z" fill="currentColor"/></svg>
       </button>
@@ -577,6 +589,7 @@ function enterChat(){
 async function send(text){
   text=(text||"").trim();
   if(!text || state.busy) return;
+  stopVoice();
   addMsg("me", text);
   state.dialogue.push({role:"user", content:text});
   $("#input").value=""; autosize();
@@ -827,7 +840,13 @@ function showDemoMemo(){
 }
 
 /* ---------------- 工具 ---------------- */
-function setBusy(b){ state.busy=b; $("#sendBtn").disabled=b||!$("#input").value.trim(); $("#input").disabled=b; }
+function setBusy(b){
+  state.busy=b;
+  $("#sendBtn").disabled=b||!$("#input").value.trim();
+  $("#input").disabled=b;
+  const mic=$("#micBtn"); if(mic) mic.disabled=b;
+  if(b) stopVoice();
+}
 function scrollDown(){ requestAnimationFrame(()=>window.scrollTo({top:document.body.scrollHeight,behavior:"smooth"})); }
 function escapeHtml(s){ return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function autosize(){ const t=$("#input"); t.style.height="auto"; t.style.height=Math.min(t.scrollHeight,120)+"px"; }
@@ -842,10 +861,64 @@ function resetAll(){
   $("#welcome").classList.remove("hidden");
 }
 
+/* ---------------- 语音录入（Web Speech API） ---------------- */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recog=null, listening=false, voiceBase="";
+
+function setMic(on){
+  listening=on;
+  const b=$("#micBtn"); if(!b) return;
+  b.classList.toggle("rec", on);
+  $("#input").placeholder = on ? "正在聆听，请说话…" : "说说你正在纠结的决策…";
+}
+function stopVoice(){
+  if(recog && listening){ try{ recog.stop(); }catch(_){} }
+  setMic(false);
+}
+function initRecog(){
+  if(!SR) return null;
+  const r=new SR();
+  r.lang="zh-CN"; r.continuous=true; r.interimResults=true;
+  r.onresult=(e)=>{
+    let interim="", finals="";
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const seg=e.results[i][0].transcript;
+      if(e.results[i].isFinal) finals+=seg; else interim+=seg;
+    }
+    if(finals) voiceBase += finals;
+    const input=$("#input");
+    input.value = voiceBase + interim;
+    autosize();
+    $("#sendBtn").disabled = state.busy || !input.value.trim();
+  };
+  r.onerror=(e)=>{
+    if(e.error==="not-allowed"||e.error==="service-not-allowed") toast("麦克风未授权，请在浏览器允许后重试");
+    else if(e.error!=="no-speech" && e.error!=="aborted") toast("语音识别出错："+e.error);
+    setMic(false);
+  };
+  r.onend=()=>setMic(false);
+  return r;
+}
+function toggleMic(){
+  if(state.busy) return;
+  if(listening){ stopVoice(); return; }
+  if(!recog) recog=initRecog();
+  if(!recog){ toast("当前浏览器不支持语音识别，建议用 Chrome"); return; }
+  voiceBase=$("#input").value;
+  if(voiceBase && !/\s$/.test(voiceBase)) voiceBase+=" ";
+  try{ recog.start(); setMic(true); }catch(_){ /* 已在运行中 */ }
+}
+function initVoiceUI(){
+  const b=$("#micBtn"); if(!b) return;
+  if(!SR){ b.style.display="none"; return; }   // 浏览器不支持就隐藏按钮
+  b.onclick=toggleMic;
+}
+
 /* ---------------- 绑定 ---------------- */
 $("#beginBtn").onclick=enterChat;
 $("#demoBtn").onclick=showDemoMemo;
 $("#input").addEventListener("input",()=>{ autosize(); $("#sendBtn").disabled=state.busy||!$("#input").value.trim(); });
 $("#input").addEventListener("keydown",e=>{ if(e.key==="Enter"&&!e.shiftKey&&!e.isComposing){ e.preventDefault(); send($("#input").value); }});
 $("#sendBtn").onclick=()=>send($("#input").value);
+initVoiceUI();
 </script>
