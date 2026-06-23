@@ -459,6 +459,7 @@ async function callLLM(system, messages){
       model: MODEL,
       messages: [{role:"system", content:system}, ...messages],
       max_tokens: 2000,
+      temperature: 0.2,
       stream: false
     })
   });
@@ -475,6 +476,19 @@ function parseJSON(raw){
   const a=t.indexOf("{"), b=t.lastIndexOf("}");
   if(a>=0 && b>=0) t=t.slice(a,b+1);
   return JSON.parse(t);
+}
+// 取结构化 JSON：若模型这轮没吐合法 JSON，追加一次"只要 JSON"的强提醒自动重试
+async function getStructured(system, messages){
+  let raw = await callLLM(system, messages);
+  try{ return parseJSON(raw); }
+  catch(_){
+    raw = await callLLM(system, [
+      ...messages,
+      {role:"assistant", content: raw},
+      {role:"user", content:"上面的回复不是合法 JSON。只输出那个 JSON 对象本身，从 { 开始到 } 结束，不要任何解释、前后缀或代码块。"}
+    ]);
+    return parseJSON(raw);
+  }
 }
 
 /* ---------------- 渲染 ---------------- */
@@ -566,11 +580,13 @@ async function send(text){
   addMsg("me", text);
   state.dialogue.push({role:"user", content:text});
   $("#input").value=""; autosize();
-  setBusy(true); renderChips([]); showTyping();
+  await runTurn();
+}
 
+async function runTurn(){
+  setBusy(true); renderChips([]); showTyping();
   try{
-    const raw = await callLLM(systemPrompt(), state.dialogue);
-    const r = parseJSON(raw);
+    const r = await getStructured(systemPrompt(), state.dialogue);
     hideTyping();
 
     if(typeof r.wwOk==="boolean" && r.wwOk && !state.wwChecked) setWW(true);
@@ -578,7 +594,9 @@ async function send(text){
     if(r.stage){ state.stage=r.stage; lightDials(r.stage, false); }
     renderTray();
 
-    if(r.reply){ addMsg("co", r.reply); state.dialogue.push({role:"assistant", content:r.reply}); }
+    if(r.reply) addMsg("co", r.reply);
+    // 关键：把完整 JSON 写回历史，让模型持续看到 JSON 结构，避免下一轮退化成大白话
+    state.dialogue.push({role:"assistant", content: JSON.stringify(r)});
     if(r.trap && r.trap.name) addTrap(r.trap);
     renderChips(r.chips);
 
@@ -588,7 +606,7 @@ async function send(text){
     }
   }catch(e){
     hideTyping();
-    showError();
+    showError(runTurn);
     console.error(e);
   }finally{
     setBusy(false);
@@ -596,29 +614,28 @@ async function send(text){
 }
 
 async function generateMemo(){
-  setBusy(true);
+  setBusy(true); renderChips([]);
   const note = el("div","msg co");
   note.innerHTML='<div class="who">副驾</div><div class="bub">够清楚了。我把它整理成一页纸备忘录…</div>';
   $("#thread").appendChild(note); scrollDown();
   showTyping();
   try{
-    const raw = await callLLM(memoPrompt(), [
+    const memo = await getStructured(memoPrompt(), [
       ...state.dialogue,
       {role:"user", content:"现在生成这份决策备忘录的 JSON。"}
     ]);
-    const memo = parseJSON(raw);
     hideTyping();
     renderMemo(memo);
   }catch(e){
-    hideTyping(); showError(); console.error(e);
+    hideTyping(); showError(generateMemo); console.error(e);
   }finally{ setBusy(false); }
 }
 
-function showError(){
+function showError(retryFn){
   const m=el("div","msg co");
-  m.innerHTML='<div class="who">副驾</div><div class="bub">没连上副驾。点这里重发上一条，或检查网络后再试。</div>';
+  m.innerHTML='<div class="who">副驾</div><div class="bub">没连上副驾，可能是网络波动或返回异常。点这里重试。</div>';
   const b=m.querySelector(".bub"); b.style.cursor="pointer"; b.style.borderColor="var(--ember)";
-  b.onclick=()=>{ const last=[...state.dialogue].reverse().find(d=>d.role==="user"); m.remove(); if(last) send(last.content); };
+  b.onclick=()=>{ if(state.busy) return; m.remove(); (retryFn||runTurn)(); };
   $("#thread").appendChild(m); scrollDown();
 }
 
