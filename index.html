@@ -192,6 +192,33 @@
   .mic:disabled{opacity:.4; cursor:default}
   .mic.rec{ background:var(--ember); border-color:var(--ember); color:#1A1710; animation:micpulse 1.3s infinite }
   @keyframes micpulse{0%{box-shadow:0 0 0 0 rgba(210,134,90,.5)}70%{box-shadow:0 0 0 9px rgba(210,134,90,0)}100%{box-shadow:0 0 0 0 rgba(210,134,90,0)}}
+  /* 上传按钮（图片 / 文件），与 mic 同形 */
+  .attach{
+    width:38px; height:38px; flex:none; border-radius:50%; cursor:pointer;
+    background:transparent; border:1px solid var(--line); color:var(--mist);
+    display:grid; place-items:center; transition:.18s;
+  }
+  .attach:active:not(:disabled){transform:scale(.9)}
+  .attach:disabled{opacity:.4; cursor:default}
+  /* 上传进度 / 来源列表 */
+  .srcs{display:flex; flex-direction:column; gap:6px; margin-bottom:9px}
+  .srcs:empty{display:none}
+  .src{
+    display:flex; align-items:center; gap:9px; font-size:12.5px;
+    background:var(--ink-2); border:1px solid var(--line);
+    border-radius:10px; padding:7px 11px; color:var(--mist);
+    animation:rise .3s ease both;
+  }
+  .src .ico{flex:none; width:14px; text-align:center}
+  .src .nm{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text)}
+  .src .st{flex:none; font-size:11px}
+  .src.ok{border-left:2px solid var(--brass)}
+  .src.err{border-left:2px solid var(--ember); color:#E0B3A6}
+  .spin{
+    width:13px; height:13px; border:2px solid var(--line); border-top-color:var(--brass);
+    border-radius:50%; animation:sp .7s linear infinite; display:inline-block;
+  }
+  @keyframes sp{to{transform:rotate(360deg)}}
   .foot{text-align:center; font-size:10.5px; color:var(--mist-2); margin-top:8px; font-family:var(--cn)}
 
   /* ---------- 欢迎态 ---------- */
@@ -361,8 +388,12 @@
   <!-- 输入区 -->
   <div class="dock hidden" id="dock">
     <div class="chips" id="chips"></div>
+    <div class="srcs" id="srcs"></div>
     <div class="inbar">
       <textarea id="input" rows="1" placeholder="说说你正在纠结的决策…"></textarea>
+      <button class="attach" id="upBtn" aria-label="上传图片或文件" title="图片 / 文件">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M20 11.5l-7.6 7.6a4.5 4.5 0 0 1-6.36-6.36l7.6-7.6a3 3 0 0 1 4.24 4.24l-7.6 7.6a1.5 1.5 0 0 1-2.12-2.12l6.9-6.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+      </button>
       <button class="mic" id="micBtn" aria-label="语音输入">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3.5M9 20.5h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none"/></svg>
       </button>
@@ -370,6 +401,8 @@
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M4 12l16-8-5 8 5 8-16-8z" fill="currentColor"/></svg>
       </button>
     </div>
+    <input type="file" id="file" hidden multiple
+      accept="image/*,.pdf,.docx,.xlsx,.xls,.txt,.md,.csv,.json,.log">
     <div class="foot">基于王嘉陵《决策思维》GPA·IPO 框架 · 副驾会出错，决定由你做</div>
   </div>
 </div>
@@ -380,10 +413,10 @@
 const $ = s => document.querySelector(s);
 const el = (t,c) => { const e=document.createElement(t); if(c) e.className=c; return e; };
 
-/* ===== 大模型接口配置（改这里即可切换或接入代理） ===== */
-const API_URL = "https://api.deepseek.com/chat/completions"; // ⚠ 浏览器直连会被 CORS 拦截，正式使用请改成你自己的代理地址
-const API_KEY = "sk-9307fc5e0fdd4150946674e1ab5f2a9a";        // ⚠ 明文写在前端，任何拿到此文件的人都能看到。仅供本地测试，用完请到 DeepSeek 后台重置
-const MODEL   = "deepseek-v4-pro";
+/* ===== 大模型接口：经同源代理 /llm 调用 DeepSeek（与「决策速写」完全一致） =====
+   key 只在服务端（Cloudflare 环境变量 DEEPSEEK_KEY），前端不暴露；
+   模型由代理端 DEEPSEEK_MODEL 决定，默认 deepseek-v4-pro。 */
+const LLM_PROXY = "/llm";
 /* ===================================================== */
 
 const STAGES = ["GOAL","PRIORITY","ALT","INFO","PEOPLE","REASON"];
@@ -459,29 +492,26 @@ function memoPrompt(){
   ].join("\n");
 }
 
-/* ---------------- API（DeepSeek · OpenAI 兼容格式） ---------------- */
+/* ---------------- API（经同源代理 /llm 调用 DeepSeek） ---------------- */
 async function callLLM(system, messages){
-  const res = await fetch(API_URL,{
+  const res = await fetch(LLM_PROXY,{
     method:"POST",
-    headers:{
-      "Content-Type":"application/json",
-      "Authorization":"Bearer "+API_KEY
-    },
+    headers:{ "Content-Type":"application/json" },
     body:JSON.stringify({
-      model: MODEL,
-      messages: [{role:"system", content:system}, ...messages],
+      system,                 // 系统提示词
+      messages,               // 完整多轮对话，由代理端拼到 system 之后
       max_tokens: 2000,
-      temperature: 0.2,
-      stream: false
+      temperature: 0.2
     })
   });
   if(!res.ok){
-    let detail=""; try{ const e=await res.json(); detail=(e.error&&e.error.message)||""; }catch(_){}
-    throw new Error("HTTP "+res.status+(detail?(" · "+detail):""));
+    let detail=""; try{ const e=await res.json(); detail=(e&&(e.error?.message||e.error))||""; }catch(_){}
+    throw new Error("LLM HTTP "+res.status+(detail?(" · "+detail):""));
   }
   const data = await res.json();
+  if(data.error) throw new Error(typeof data.error==="string"?data.error:(data.error.message||"LLM 代理返回错误"));
   const msg = data.choices && data.choices[0] && data.choices[0].message;
-  return ((msg && msg.content) || "").trim();
+  return ((msg && msg.content) || data.text || "").trim();
 }
 function parseJSON(raw){
   let t = raw.replace(/```json|```/g,"").trim();
@@ -845,6 +875,7 @@ function setBusy(b){
   $("#sendBtn").disabled=b||!$("#input").value.trim();
   $("#input").disabled=b;
   const mic=$("#micBtn"); if(mic) mic.disabled=b;
+  const up=$("#upBtn"); if(up) up.disabled=b;
   if(b) stopVoice();
 }
 function scrollDown(){ requestAnimationFrame(()=>window.scrollTo({top:document.body.scrollHeight,behavior:"smooth"})); }
@@ -859,6 +890,96 @@ function resetAll(){
   $("#rail").querySelectorAll(".dial").forEach(d=>d.classList.remove("active","current","justlit"));
   $("#thread").classList.add("hidden"); $("#dock").classList.add("hidden");
   $("#welcome").classList.remove("hidden");
+  const srcs=$("#srcs"); if(srcs) srcs.innerHTML="";
+}
+
+/* ---------------- 上传：图片/文件 → 抽成文字 → 汇入输入框 ---------------- */
+/* 与「决策速写」完全一致：文本/PDF/Word/Excel 在浏览器本地抽取，图片走同源代理 /ocr（飞桨 PaddleOCR，token 只在服务端，前端不暴露任何 key） */
+const _libs={};
+function loadScript(url){
+  if(_libs[url]) return _libs[url];
+  return _libs[url]=new Promise((res,rej)=>{
+    const s=document.createElement("script"); s.src=url; s.onload=res;
+    s.onerror=()=>rej(new Error("库加载失败（网络/CDN）")); document.head.appendChild(s);
+  });
+}
+const CDN={
+  pdf:"https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js",
+  pdfw:"https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js",
+  mammoth:"https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js",
+  xlsx:"https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js",
+};
+const PROXY_OCR = "/ocr";   // 与决策速写相同：同源代理，token 在 Cloudflare 环境变量里
+
+async function paddleOCR(file, chip){
+  if(chip) setSrc(chip,"load","上传识别中（经代理，可能要十几秒）…");
+  const fd=new FormData(); fd.append("file", file);
+  let r;
+  try{ r=await fetch(PROXY_OCR,{method:"POST",body:fd}); }
+  catch(e){ throw new Error("连不上 OCR 代理——图片识别需要同源部署 /ocr（与决策速写同一套）"); }
+  if(!r.ok){ const t=await r.text().catch(()=>""); throw new Error("OCR HTTP "+r.status+(t?(" · "+t.slice(0,100)):"")); }
+  const j=await r.json();
+  if(j.error) throw new Error(j.error);
+  return j.text||"";
+}
+
+async function extractFile(file, chip){
+  const n=file.name.toLowerCase(), buf=()=>file.arrayBuffer();
+  if(/\.(txt|md|csv|json|log)$/.test(n) || file.type.startsWith("text/")) return await file.text();
+  if(n.endsWith(".pdf")){
+    await loadScript(CDN.pdf); pdfjsLib.GlobalWorkerOptions.workerSrc=CDN.pdfw;
+    const pdf=await pdfjsLib.getDocument({data:await buf()}).promise; let t="";
+    for(let p=1;p<=pdf.numPages;p++){ const pg=await pdf.getPage(p); const c=await pg.getTextContent();
+      t+=c.items.map(i=>i.str).join(" ")+"\n"; }
+    return t;
+  }
+  if(n.endsWith(".docx")){
+    await loadScript(CDN.mammoth);
+    return (await mammoth.extractRawText({arrayBuffer:await buf()})).value;
+  }
+  if(/\.(xlsx|xls)$/.test(n)){
+    await loadScript(CDN.xlsx);
+    const wb=XLSX.read(await buf(),{type:"array"});
+    return wb.SheetNames.map(s=>`# ${s}\n`+XLSX.utils.sheet_to_csv(wb.Sheets[s])).join("\n\n");
+  }
+  if(file.type.startsWith("image/")){
+    return await paddleOCR(file, chip);
+  }
+  throw new Error("暂不支持这个类型");
+}
+
+async function onFiles(e){
+  const files=[...e.target.files]; e.target.value="";
+  for(const f of files){
+    const chip=addSrc(f.name);
+    try{
+      const text=await extractFile(f, chip);
+      if(!text || !text.trim()) throw new Error("没读到文字（可能是扫描件或空白）");
+      appendToInput(f.name, text);
+      setSrc(chip,"ok",`已读取 · ${text.trim().length} 字`);
+    }catch(err){ setSrc(chip,"err", err.message||"读取失败"); }
+  }
+}
+function addSrc(name){
+  const e=el("div","src");
+  e.innerHTML=`<span class="ico spin"></span><span class="nm">${escapeHtml(name)}</span><span class="st">读取中…</span>`;
+  $("#srcs").appendChild(e); return e;
+}
+function setSrc(node,kind,msg){
+  const ico = kind==="ok"?`<span class="ico" style="color:var(--brass-2)">✓</span>`
+           : kind==="err"?`<span class="ico" style="color:var(--ember)">✕</span>`
+           : `<span class="ico spin"></span>`;
+  node.className="src "+(kind==="load"?"":kind);
+  node.querySelector(".ico").outerHTML=ico;
+  node.querySelector(".st").textContent=msg;
+}
+function appendToInput(name,text){
+  const input=$("#input"), tag=`【来自：${name}】\n${text.trim()}`;
+  input.value = input.value.trim() ? input.value.trimEnd()+"\n\n"+tag : tag;
+  autosize();
+  $("#sendBtn").disabled = state.busy || !input.value.trim();
+  input.focus();
+  input.scrollTop = input.scrollHeight;
 }
 
 /* ---------------- 语音录入（Web Speech API） ---------------- */
@@ -893,10 +1014,11 @@ function initRecog(){
   };
   r.onerror=(e)=>{
     if(e.error==="not-allowed"||e.error==="service-not-allowed") toast("麦克风未授权，请在浏览器允许后重试");
+    else if(e.error==="network") toast("语音服务连不上（多为网络或区域限制），可改用键盘 🎤 或打字");
     else if(e.error!=="no-speech" && e.error!=="aborted") toast("语音识别出错："+e.error);
     setMic(false);
   };
-  r.onend=()=>setMic(false);
+  r.onend=()=>{ if(listening && !state.busy){ try{ r.start(); return; }catch(_){} } setMic(false); };  // 自然停顿后自动续录，点停止才结束
   return r;
 }
 function toggleMic(){
@@ -920,5 +1042,7 @@ $("#demoBtn").onclick=showDemoMemo;
 $("#input").addEventListener("input",()=>{ autosize(); $("#sendBtn").disabled=state.busy||!$("#input").value.trim(); });
 $("#input").addEventListener("keydown",e=>{ if(e.key==="Enter"&&!e.shiftKey&&!e.isComposing){ e.preventDefault(); send($("#input").value); }});
 $("#sendBtn").onclick=()=>send($("#input").value);
+$("#upBtn").onclick=()=>{ if(state.busy) return; $("#file").click(); };
+$("#file").onchange=onFiles;
 initVoiceUI();
 </script>
